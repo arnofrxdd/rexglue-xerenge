@@ -426,6 +426,20 @@ void* AllocFixed(void* base_address, size_t length, AllocationType allocation_ty
 #endif
 
   void* result = mmap(base_address, length, prot_initial, flags, -1, 0);
+#if defined(MAP_FIXED_NOREPLACE) && REX_PLATFORM_LINUX
+  // A kernel before 4.17 does not know MAP_FIXED_NOREPLACE and ignores it: the
+  // address is then only a hint, and over an existing reservation it hands out
+  // memory somewhere else instead of failing with EEXIST. Returned as if it
+  // were the address asked for, the guest's page stayed without access - the
+  // first thread stack (guest 0x70550000) faulted at once on every Android 10
+  // phone with a 4.4-4.14 kernel. Not where it was asked: given back, and
+  // treated as the EEXIST it should have been.
+  if (result != MAP_FAILED && base_address && result != base_address) {
+    munmap(result, length);
+    result = MAP_FAILED;
+    errno = EEXIST;
+  }
+#endif
   if (result != MAP_FAILED) {
 #if REX_PLATFORM_LINUX
     Protections().Set(PageFloor(result), PageCeil(result, length),
