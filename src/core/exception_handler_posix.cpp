@@ -13,6 +13,9 @@
 // Darwin hides the deprecated ucontext API unless an XSI feature level is
 // requested before <ucontext.h> is included.
 #define _XOPEN_SOURCE 700
+// And that level hides Darwin's own extensions, Dl_info among them (the
+// unhandled-crash report uses dladdr).
+#define _DARWIN_C_SOURCE
 #endif
 
 #include <rex/exception_handler.h>
