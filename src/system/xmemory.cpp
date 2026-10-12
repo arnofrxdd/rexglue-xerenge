@@ -30,9 +30,9 @@
 #include <rex/system/xmemory.h>
 
 #include <atomic>
-#if defined(__linux__) && !defined(__ANDROID__)  // bionic: backtrace() only from API 33
+#if defined(__linux__)
 #include <dlfcn.h>
-#include <execinfo.h>
+#include <unwind.h>
 #endif
 #include <rex/thread.h>
 
@@ -549,18 +549,40 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
   uint32_t virtual_address = HostToGuestVirtual(host_address);
   BaseHeap* heap = LookupHeap(virtual_address);
   if (!heap || heap->heap_type() != memory::HeapType::kGuestPhysical) {
-    REXSYS_ERROR(
-        "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread 0x{:X}",
-        is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
-        rex::thread::current_thread_id());
-#if defined(__linux__) && !defined(__ANDROID__)
+    // A few, not every one: before the signal handler passed an unhandled
+    // fault on, it came back here a hundred thousand times a second and
+    // rotated everything before it out of the log.
+    static std::atomic<uint32_t> reported{0};
+    if (reported.fetch_add(1, std::memory_order_relaxed) < 8) {
+      REXSYS_ERROR(
+          "Unhandled guest access violation: {} of guest 0x{:08X} (host 0x{:016X}) on thread 0x{:X}",
+          is_write ? "write" : "read", virtual_address, reinterpret_cast<uintptr_t>(host_address),
+          rex::thread::current_thread_id());
+    }
+#if defined(__linux__)
     // Once per process, the host stack: the recompiled code runs as native
     // functions named after their guest address (sub_XXXXXXXX), so this says
     // which guest function faulted. Frames are "module+offset", for addr2line.
+    // _Unwind_Backtrace rather than backtrace(), which bionic only has from
+    // API 33 - the Android reports are the ones that need it.
     static std::atomic<bool> stack_logged{false};
     if (!stack_logged.exchange(true)) {
-      void* frames[40];
-      const int count = backtrace(frames, 40);
+      struct Frames {
+        void* at[40];
+        int count = 0;
+      } stack;
+      _Unwind_Backtrace(
+          [](_Unwind_Context* context, void* arg) -> _Unwind_Reason_Code {
+            auto* s = static_cast<Frames*>(arg);
+            if (s->count >= 40) {
+              return _URC_END_OF_STACK;
+            }
+            s->at[s->count++] = reinterpret_cast<void*>(_Unwind_GetIP(context));
+            return _URC_NO_REASON;
+          },
+          &stack);
+      void* const* frames = stack.at;
+      const int count = stack.count;
       for (int i = 0; i < count; ++i) {
         Dl_info info{};
         if (dladdr(frames[i], &info) && info.dli_fname) {

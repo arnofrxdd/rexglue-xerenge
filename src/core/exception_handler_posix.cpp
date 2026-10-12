@@ -19,10 +19,13 @@
 
 #if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
 
+#include <dlfcn.h>
 #include <signal.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <string>
 
 #include <rex/assert.h>
 #include <rex/logging.h>
@@ -416,6 +419,51 @@ static void ExceptionHandlerCallback(int signal_number, siginfo_t* signal_info,
 #endif  // REX_ARCH
       return;
     }
+  }
+  // No handler took it: a real crash. Returning would run the faulting
+  // instruction again, fault again and come back here, forever - the title
+  // hung on a black screen while the log filled with the same line, a
+  // hundred thousand a second, and rotated away everything before it (the
+  // Android reports). Say once where it happened, then hand the signal to
+  // whatever handled it before us (on Android debuggerd, which writes the
+  // tombstone), or to the default action.
+  static std::atomic<bool> reported{false};
+  if (!reported.exchange(true)) {
+#if REX_ARCH_ARM64
+    const uintptr_t pc = uintptr_t(thread_context.pc);
+    const uintptr_t lr = uintptr_t(thread_context.x[30]);
+#elif REX_ARCH_AMD64
+    const uintptr_t pc = uintptr_t(thread_context.rip);
+    const uintptr_t lr = 0;
+#endif
+    auto where = [](uintptr_t address) -> std::string {
+      Dl_info info{};
+      if (address && dladdr(reinterpret_cast<void*>(address), &info) && info.dli_fname) {
+        const char* name = std::strrchr(info.dli_fname, '/');
+        return fmt::format("{}+0x{:X} ({})", name ? name + 1 : info.dli_fname,
+                           address - reinterpret_cast<uintptr_t>(info.dli_fbase),
+                           info.dli_sname ? info.dli_sname : "?");
+      }
+      return fmt::format("0x{:X}", address);
+    };
+    REXSYS_ERROR("Unhandled signal {} at {} (fault address 0x{:X}), called from {} - crashing",
+                 signal_number, where(pc), reinterpret_cast<uintptr_t>(signal_info->si_addr),
+                 where(lr));
+    rex::FlushLogging();
+  }
+  const struct sigaction& original = signal_number == SIGILL    ? original_sigill_handler_
+#if REX_PLATFORM_MAC
+                                     : signal_number == SIGBUS ? original_sigbus_handler_
+#endif
+                                                                : original_sigsegv_handler_;
+  if ((original.sa_flags & SA_SIGINFO) && original.sa_sigaction) {
+    original.sa_sigaction(signal_number, signal_info, signal_context);
+  } else if (original.sa_handler != SIG_DFL && original.sa_handler != SIG_IGN) {
+    original.sa_handler(signal_number);
+  } else {
+    // The default action once the instruction runs again: the process ends
+    // (with a core dump where enabled) instead of spinning.
+    signal(signal_number, SIG_DFL);
   }
 }
 
