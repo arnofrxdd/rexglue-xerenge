@@ -10,6 +10,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -66,6 +67,15 @@ class InputSystem : public system::IInputSystem {
   std::vector<DeviceInfo> devices_;
   std::vector<InputDriver*> device_owners_;
 };
+
+/// Sees every vibration the title asks for, before any pad does: user index and
+/// the two motor speeds. Returning true means it has taken the vibration itself
+/// (a phone's own vibrator, or nowhere at all): the pads are then told to stop
+/// and the title that it worked. A host sets it once; it replaces the last one.
+/// It is how a game routes rumble without hooking its own wrapper around
+/// XamInputSetState by address.
+using VibrationObserver = std::function<bool(uint32_t user_index, uint16_t left, uint16_t right)>;
+void SetVibrationObserver(VibrationObserver observer);
 
 /// Create a default InputSystem with SDL + NOP drivers.
 /// In tool mode, only the NOP driver is added.

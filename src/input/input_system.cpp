@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <mutex>
 #include <algorithm>
 #include <cmath>
 #include <set>
@@ -262,10 +263,35 @@ X_RESULT InputSystem::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
   return X_ERROR_SUCCESS;
 }
 
+namespace {
+std::mutex g_vibration_observer_mutex;
+VibrationObserver g_vibration_observer;
+}  // namespace
+
+void SetVibrationObserver(VibrationObserver observer) {
+  std::lock_guard lock(g_vibration_observer_mutex);
+  g_vibration_observer = std::move(observer);
+}
+
 X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration) {
   SCOPE_profile_cpu_f("hid");
+  // The host's say first (SetVibrationObserver): a vibration it takes reaches
+  // the pads as a stop, and the title is told it worked - it takes a failure
+  // to mean the motor kept its old value and would send it back for ever.
+  bool taken = false;
+  if (vibration) {
+    std::lock_guard lock(g_vibration_observer_mutex);
+    if (g_vibration_observer) {
+      taken = g_vibration_observer(user_index, vibration->left_motor_speed,
+                                   vibration->right_motor_speed);
+    }
+  }
+  X_INPUT_VIBRATION stop{};
+  if (taken) {
+    vibration = &stop;
+  }
   if (!assignment_) {
-    return X_ERROR_DEVICE_NOT_CONNECTED;
+    return taken ? X_ERROR_SUCCESS : X_ERROR_DEVICE_NOT_CONNECTED;
   }
 
   RefreshDevices();
@@ -296,6 +322,9 @@ X_RESULT InputSystem::SetState(uint32_t user_index, X_INPUT_VIBRATION* vibration
     } else {
       pad_error = result;
     }
+  }
+  if (taken) {
+    return X_ERROR_SUCCESS;
   }
   if (any_pad) {
     return pad_rumbled ? X_ERROR_SUCCESS : pad_error;
