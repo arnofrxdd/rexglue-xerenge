@@ -11,6 +11,7 @@
  */
 
 #include <cstring>
+#include <memory>
 #include <queue>
 
 #include <rex/math.h>
@@ -130,6 +131,11 @@ class XSocket : public XObject {
   // Queue a packet into our internal buffer.
   bool QueuePacket(uint32_t src_ip, uint16_t src_port, const uint8_t* buf, size_t len);
 
+  // A UDP port shared by several of the title's sockets, as on the console:
+  // one native socket holds it, and the datagrams it receives go to the member
+  // that talks to their sender (see xsocket.cpp).
+  struct PortGroup;
+
  private:
   XSocket(KernelState* kernel_state, uint64_t native_handle);
   uint64_t native_handle_ = -1;
@@ -147,6 +153,12 @@ class XSocket : public XObject {
   std::unique_ptr<rex::thread::Event> event_;
   std::mutex incoming_packet_mutex_;
   std::queue<uint8_t*> incoming_packets_;
+
+  // The shared port this socket is a member of, once it is one; the port it
+  // asked for and found held by another of these sockets, until then.
+  std::shared_ptr<PortGroup> group_;
+  uint64_t share_key_ = 0;
+  std::shared_ptr<PortGroup> Shared();
 };
 
 }  // namespace rex::system

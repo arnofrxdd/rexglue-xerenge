@@ -22,6 +22,7 @@
 #include <vector>
 #include <chrono>
 #include <random>
+#include <algorithm>
 #include <string>
 #include <cstring>
 
@@ -542,6 +543,18 @@ std::vector<PendingRecv> g_pending;
 std::map<u32, u32> g_completed;  // overlapped guest address -> byte count
 std::atomic<bool> g_poller_started{false};
 
+// A socket's receives still waiting, taken back when it closes. Left behind,
+// they outlived it: the next socket the title opened got the same handle, and
+// the poller filled the old receive's buffer and address - memory of the
+// session before - with the new socket's datagrams, so the title answered a
+// peer at an address that was never one (a third player stuck connecting).
+void DropPendingRecvs(u32 socket_handle) {
+  std::lock_guard<std::mutex> lock(g_pending_mutex);
+  g_pending.erase(std::remove_if(g_pending.begin(), g_pending.end(),
+                                 [&](const PendingRecv& p) { return p.socket_handle == socket_handle; }),
+                  g_pending.end());
+}
+
 int TryRecvInto(const PendingRecv& p) {
   auto socket = REX_KERNEL_OBJECTS()->LookupObject<XSocket>(p.socket_handle);
   if (!socket) return -2;
@@ -591,8 +604,24 @@ void StartRecvPoller() {
       }
       { static int ticks = 0; if (OnlineStub() && ++ticks % 3000 == 1) REXKRNL_INFO("--online wire: poller tick {} pending {}", ticks, work.size()); }
       for (const auto& p : work) {
+        {
+          // Taken back since the copy (its socket closed, or asked again).
+          std::lock_guard<std::mutex> lock(g_pending_mutex);
+          if (std::none_of(g_pending.begin(), g_pending.end(), [&](const PendingRecv& q) {
+                return q.overlapped == p.overlapped && q.socket_handle == p.socket_handle;
+              })) {
+            continue;
+          }
+        }
         int ret = TryRecvInto(p);
         if (ret == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) continue;
+        if (ret > 0 && p.from) {
+          auto* from = REX_KERNEL_MEMORY()->TranslateVirtual<XSOCKADDR_IN*>(p.from);
+          const uint32_t ip = from->sin_addr;
+          REXKRNL_INFO("--online wire: poller recv socket {:08X} ov {:08X} ret {} from {}.{}.{}.{}:{} (into {:08X})",
+                       p.socket_handle, p.overlapped, ret, ip >> 24, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF,
+                       ip & 0xFF, uint16_t(from->sin_port), p.from);
+        } else
         REXKRNL_INFO("--online wire: poller recv socket {:08X} ret {} errno {}", p.socket_handle, ret, errno);
         {
           std::lock_guard<std::mutex> lock(g_pending_mutex);
@@ -647,6 +676,10 @@ u32 NetDll_WSARecvFrom_entry(u32 caller, u32 socket, ppc_ptr_t<XWSABUF> buffers_
   {
     std::lock_guard<std::mutex> lock(g_pending_mutex);
     g_completed.erase(overlapped_ptr);
+    // The same overlapped asked again: this receive replaces the one before.
+    g_pending.erase(std::remove_if(g_pending.begin(), g_pending.end(),
+                                   [&](const PendingRecv& q) { return q.overlapped == overlapped_ptr; }),
+                    g_pending.end());
     g_pending.push_back(p);
   }
   StartRecvPoller();
@@ -1422,6 +1455,7 @@ u32 NetDll_closesocket_entry(u32 caller, u32 socket_handle) {
     return -1;
   }
 
+  DropPendingRecvs(socket_handle);
   // TODO: Absolutely delete this object. It is no longer valid after calling
   // closesocket.
   socket->Close();
@@ -1506,6 +1540,18 @@ u32 NetDll_bind_entry(u32 caller, u32 socket_handle, ppc_ptr_t<XSOCKADDR_IN> nam
     XThread::SetLastError(xboxkrnl::xeRtlNtStatusToDosError(status));
     return -1;
   }
+#ifndef _WIN32
+  // The port the system chose, for a socket bound to port 0.
+  if (OnlineStub() && native_name.sin_port == 0) {
+    sockaddr_in bound = {};
+    socklen_t bound_length = sizeof(bound);
+    if (getsockname(int(socket->native_handle()), reinterpret_cast<sockaddr*>(&bound),
+                    &bound_length) == 0) {
+      REXKRNL_INFO("--online wire: socket {:08X} got port {}", socket_handle,
+                   ntohs(bound.sin_port));
+    }
+  }
+#endif
 
   return 0;
 }

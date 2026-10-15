@@ -9,9 +9,16 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <algorithm>
 #include <cstring>
+#include <deque>
+#include <map>
+#include <mutex>
+#include <set>
+#include <vector>
 
 #include <rex/kernel/xam/module.h>
+#include <rex/logging/macros.h>
 #include <rex/platform.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/xsocket.h>
@@ -34,6 +41,73 @@
 #endif
 
 namespace rex::system {
+
+// Shared UDP ports. The console lets several of the title's sockets have one
+// port: a game of three needs it - each player keeps a socket on 8192 for
+// every other player, and the one waiting for a newcomer is bound there while
+// the one to the host already is. A host system refuses the second bind
+// (EADDRINUSE), and the player already in the game could not take the third:
+// the third stayed "connecting" until it gave up.
+//
+// So a socket whose bind failed on a port one of these sockets holds is noted,
+// and if the title does not bind it elsewhere (as it does with the sockets it
+// moves to port 0 or 6000) but receives or sends with it, it joins that port.
+// The holder's native socket receives for all of them; each datagram goes to
+// the member that has sent to its sender, one from an unknown sender to the
+// newest member that has sent to no one yet - the one waiting for it - and
+// every member sends from the shared port.
+struct XSocket::PortGroup {
+  struct Datagram {
+    std::vector<uint8_t> data;
+    sockaddr_in from;
+  };
+  struct Member {
+    XSocket* socket;
+    std::set<uint64_t> peers;  // address << 16 | port, as on the wire
+    std::deque<Datagram> queue;
+  };
+  uint64_t key = 0;
+  uint64_t fd = uint64_t(-1);
+  std::vector<Member> members;  // the holder first, then by joining
+
+  Member* Find(const XSocket* socket) {
+    for (auto& member : members) {
+      if (member.socket == socket) {
+        return &member;
+      }
+    }
+    return nullptr;
+  }
+};
+
+namespace {
+
+std::mutex g_port_groups_mutex;
+std::map<uint64_t, std::weak_ptr<XSocket::PortGroup>> g_port_groups;
+
+uint64_t PortKey(uint32_t address_be, uint16_t port_be) {
+  return (uint64_t(ntohl(address_be)) << 16) | ntohs(port_be);
+}
+
+}  // namespace
+
+std::shared_ptr<XSocket::PortGroup> XSocket::Shared() {
+  if (group_ || share_key_ == 0 || bound_) {
+    return group_;
+  }
+  std::lock_guard<std::mutex> lock(g_port_groups_mutex);
+  auto found = g_port_groups.find(share_key_);
+  std::shared_ptr<PortGroup> group = found != g_port_groups.end() ? found->second.lock() : nullptr;
+  share_key_ = 0;
+  if (!group) {
+    return nullptr;
+  }
+  group->members.push_back(PortGroup::Member{this, {}, {}});
+  group_ = group;
+  REXKRNL_INFO("--online wire: a socket joins port {} shared by {} socket(s)",
+               uint16_t(group->key & 0xFFFF), group->members.size());
+  return group_;
+}
 
 XSocket::XSocket(KernelState* kernel_state) : XObject(kernel_state, kObjectType) {}
 
@@ -63,6 +137,26 @@ X_STATUS XSocket::Initialize(AddressFamily af, Type type, Protocol proto) {
 }
 
 X_STATUS XSocket::Close() {
+  share_key_ = 0;
+  if (auto group = std::move(group_)) {
+    std::lock_guard<std::mutex> lock(g_port_groups_mutex);
+    auto& members = group->members;
+    members.erase(std::remove_if(members.begin(), members.end(),
+                                 [&](const PortGroup::Member& m) { return m.socket == this; }),
+                  members.end());
+    if (native_handle_ == group->fd) {
+      if (!members.empty()) {
+        // The port stays with those still sharing it: its native socket
+        // goes when the last of them does.
+        native_handle_ = uint64_t(-1);
+        return X_STATUS_SUCCESS;
+      }
+      g_port_groups.erase(group->key);
+    } else if (members.empty() && group->fd != uint64_t(-1)) {
+      g_port_groups.erase(group->key);
+      rex::net::socket_close(group->fd);
+    }
+  }
   if (native_handle_ == uint64_t(-1)) {
     return X_STATUS_SUCCESS;
   }
@@ -156,12 +250,43 @@ X_STATUS XSocket::Bind(N_XSOCKADDR_IN* name, int name_len) {
   N_XSOCKADDR_IN mapped = *name;
   mapped.sin_port = MapWirePort(uint16_t(name->sin_port));
   int ret = bind(native_handle_, (sockaddr*)&mapped, name_len);
+  sockaddr_in native = {};
+  std::memcpy(&native, &mapped, std::min(sizeof(native), sizeof(mapped)));
+  const uint64_t key = PortKey(native.sin_addr.s_addr, native.sin_port);
+  const bool shareable = type_ == X_SOCK_DGRAM && native.sin_port != 0;
   if (ret < 0) {
+    // Held by another of these sockets: this one shares it, as on the console
+    // (the title binds a socket per player to 8192 and gives up on one that
+    // fails - CommUDP connect ":8192:8192#..." answers -5).
+    if (shareable) {
+      std::lock_guard<std::mutex> lock(g_port_groups_mutex);
+      auto found = g_port_groups.find(key);
+      if (auto group = found != g_port_groups.end() ? found->second.lock() : nullptr) {
+        group->members.push_back(PortGroup::Member{this, {}, {}});
+        group_ = group;
+        bound_ = true;
+        bound_port_ = name->sin_port;
+        share_key_ = 0;
+        REXKRNL_INFO("--online wire: port {} now shared by {} socket(s)",
+                     uint16_t(name->sin_port), group->members.size());
+        return X_STATUS_SUCCESS;
+      }
+    }
     return X_STATUS_UNSUCCESSFUL;
   }
 
   bound_ = true;
   bound_port_ = name->sin_port;
+  share_key_ = 0;
+  if (shareable) {
+    auto group = std::make_shared<PortGroup>();
+    group->key = key;
+    group->fd = native_handle_;
+    group->members.push_back(PortGroup::Member{this, {}, {}});
+    std::lock_guard<std::mutex> lock(g_port_groups_mutex);
+    g_port_groups[key] = group;
+    group_ = group;
+  }
 
   return X_STATUS_SUCCESS;
 }
@@ -233,8 +358,68 @@ int XSocket::RecvFrom(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADD
 
   sockaddr_in nfrom;
   socklen_t nfromlen = sizeof(sockaddr_in);
-  int ret = recvfrom(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
-                     (sockaddr*)&nfrom, &nfromlen);
+  int ret;
+  auto group = Shared();
+  if (group && group->members.size() > 1) {
+    // A shared port: take what its native socket has, hand each datagram to
+    // its member, then this member's first.
+    std::lock_guard<std::mutex> lock(g_port_groups_mutex);
+    for (;;) {
+      PortGroup::Datagram datagram;
+      datagram.data.resize(65536);
+      socklen_t length = sizeof(datagram.from);
+#if REX_PLATFORM_WIN32
+      u_long available = 0;
+      if (ioctlsocket(SOCKET(group->fd), FIONREAD, &available) != 0 || available == 0) {
+        break;
+      }
+      const int got = recvfrom(SOCKET(group->fd), reinterpret_cast<char*>(datagram.data.data()),
+                               int(datagram.data.size()), 0, (sockaddr*)&datagram.from, &length);
+#else
+      const int got = int(recvfrom(int(group->fd), datagram.data.data(), datagram.data.size(),
+                                   MSG_DONTWAIT, (sockaddr*)&datagram.from, &length));
+#endif
+      if (got < 0) {
+        break;
+      }
+      datagram.data.resize(size_t(got));
+      const uint64_t sender = PortKey(datagram.from.sin_addr.s_addr, datagram.from.sin_port);
+      PortGroup::Member* to = nullptr;
+      for (auto& member : group->members) {
+        if (member.peers.count(sender)) {
+          to = &member;
+          break;
+        }
+      }
+      for (auto it = group->members.rbegin(); !to && it != group->members.rend(); ++it) {
+        if (it->peers.empty()) {
+          to = &*it;
+        }
+      }
+      if (!to) {
+        to = &group->members.front();
+      }
+      to->peers.insert(sender);
+      to->queue.push_back(std::move(datagram));
+    }
+    PortGroup::Member* self = group->Find(this);
+    if (!self || self->queue.empty()) {
+#if REX_PLATFORM_WIN32
+      WSASetLastError(WSAEWOULDBLOCK);
+#else
+      errno = EAGAIN;
+#endif
+      return -1;
+    }
+    PortGroup::Datagram datagram = std::move(self->queue.front());
+    self->queue.pop_front();
+    ret = int(std::min<size_t>(datagram.data.size(), buf_len));
+    std::memcpy(buf, datagram.data.data(), size_t(ret));
+    nfrom = datagram.from;
+  } else {
+    ret = recvfrom(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
+                   (sockaddr*)&nfrom, &nfromlen);
+  }
   if (from) {
     from->sin_family = nfrom.sin_family;
     from->sin_addr = ntohl(nfrom.sin_addr.s_addr);  // BE <- BE
@@ -275,7 +460,18 @@ int XSocket::SendTo(uint8_t* buf, uint32_t buf_len, uint32_t flags, N_XSOCKADDR_
     nto.sin_family = AF_INET;
   }
 
-  return sendto(native_handle_, reinterpret_cast<char*>(buf), buf_len, flags,
+  uint64_t fd = native_handle_;
+  if (auto group = Shared()) {
+    // Sent from the shared port; replies from there come back to this member.
+    std::lock_guard<std::mutex> lock(g_port_groups_mutex);
+    fd = group->fd;
+    if (to) {
+      if (PortGroup::Member* self = group->Find(this)) {
+        self->peers.insert(PortKey(nto.sin_addr.s_addr, nto.sin_port));
+      }
+    }
+  }
+  return sendto(fd, reinterpret_cast<char*>(buf), buf_len, flags,
                 to ? (sockaddr*)&nto : nullptr, to_len);
 }
 
