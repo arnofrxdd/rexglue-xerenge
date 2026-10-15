@@ -664,7 +664,7 @@ X_HRESULT XmpApp::XMPPlayTitlePlaylist(uint32_t playlist_handle, uint32_t song_h
 }
 
 X_HRESULT XmpApp::XMPContinue() {
-  REXKRNL_DEBUG("XMPContinue()");
+  REXKRNL_INFO("XMP: title continues playback");
   if (state_ == State::kPaused) {
     state_ = State::kPlaying;
     resume_fence_.Signal();
@@ -688,7 +688,7 @@ X_HRESULT XmpApp::XMPStop(uint32_t unk) {
 }
 
 X_HRESULT XmpApp::XMPPause() {
-  REXKRNL_DEBUG("XMPPause()");
+  REXKRNL_INFO("XMP: title pauses playback");
   if (state_ == State::kPlaying) {
     state_ = State::kPaused;
     DiscardActiveDriverFrames();
@@ -698,7 +698,7 @@ X_HRESULT XmpApp::XMPPause() {
 }
 
 X_HRESULT XmpApp::XMPNext() {
-  REXKRNL_DEBUG("XMPNext()");
+  REXKRNL_INFO("XMP: title skips to the next song");
   if (!active_playlist_ || active_playlist_->songs.empty()) {
     return X_E_NOTFOUND;
   }
@@ -837,7 +837,7 @@ X_HRESULT XmpApp::DispatchMessageSync(uint32_t message, uint32_t buffer_ptr,
       static_assert_size(decltype(*args), 8);
 
       assert_true(args->xmp_client == 0x00000002);
-      REXKRNL_DEBUG("XMPSetVolume({:g})", float(args->value));
+      REXKRNL_INFO("XMP: title sets the volume to {:g}", float(args->value));
       volume_ = args->value;
       return X_E_SUCCESS;
     }
