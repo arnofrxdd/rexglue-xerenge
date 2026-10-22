@@ -438,7 +438,11 @@ X_STATUS XThread::Create() {
   RetainHandle();
 
   rex::thread::Thread::CreationParameters params;
+#if defined(__APPLE__)
+  params.stack_size = 2_MiB;  // Mobile OS virtual memory footprint
+#else
   params.stack_size = 16_MiB;  // Allocate a big host stack.
+#endif
   params.create_suspended = true;
   thread_ = rex::thread::Thread::Create(params, [this]() {
     rex::initialize_seh_thread();
