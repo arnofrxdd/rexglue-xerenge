@@ -435,6 +435,9 @@ class XThread : public XObject {
 #if REX_PLATFORM_LINUX || REX_PLATFORM_MAC
   std::mutex suspend_mutex_;
   std::condition_variable suspend_cv_;
+  // A resume that came while the thread still ran, kept (one at most) for the
+  // suspend it is about to do itself; see SelfSuspend.
+  bool early_resume_ = false;
 #endif
 
   std::mutex thread_lock_;
