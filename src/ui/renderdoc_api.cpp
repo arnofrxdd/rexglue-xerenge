@@ -9,6 +9,7 @@
  * @modified    Tom Clay, 2026 - Adapted for ReXGlue runtime
  */
 
+#include <cstdlib>
 #include <rex/logging.h>
 #include <rex/ui/renderdoc_api.h>
 
@@ -21,6 +22,11 @@ std::unique_ptr<RenderDocAPI> RenderDocAPI::CreateIfConnected() {
   // Keep RenderDoc optional and simply report "not connected" on this platform.
   return nullptr;
 #else
+  // XERENGE_NO_RENDERDOC=1 (Debug > RenderDoc off): never loaded, by any of the
+  // instances that would, so RenderDoc's layer and overlay stay out.
+  if (const char* off = std::getenv("XERENGE_NO_RENDERDOC"); off && *off == '1') {
+    return nullptr;
+  }
   std::unique_ptr<RenderDocAPI> renderdoc_api(new RenderDocAPI());
 
   pRENDERDOC_GetAPI get_api = nullptr;
