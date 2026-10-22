@@ -286,6 +286,9 @@ void XThread::InitializeGuestObject() {
 bool XThread::AllocateStack(uint32_t size) {
   auto heap = memory()->LookupHeap(kStackAddressRangeBegin);
 
+  // Guarantee ample guest stack space for statically recompiled execution
+  size = std::max(size, 8 * 1024 * 1024u);
+
   auto alignment = heap->page_size();
   auto padding = heap->page_size() * 2;  // Guard page size * 2
   size = rex::round_up(size, alignment);
@@ -308,8 +311,13 @@ bool XThread::AllocateStack(uint32_t size) {
   memory()->Fill(stack_alloc_base_, actual_size, 0xBE);
 
   // Setup the guard pages
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if !defined(TARGET_OS_IPHONE) || !TARGET_OS_IPHONE
   heap->Protect(stack_alloc_base_, padding / 2, memory::kMemoryProtectNoAccess);
   heap->Protect(stack_base_, padding / 2, memory::kMemoryProtectNoAccess);
+#endif
 
   return true;
 }

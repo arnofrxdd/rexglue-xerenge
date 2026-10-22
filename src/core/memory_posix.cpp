@@ -29,7 +29,11 @@
 
 #if REX_PLATFORM_MAC
 #include <mach/mach.h>
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#include <mach/vm_map.h>
+#else
 #include <mach/mach_vm.h>
+#endif
 #include <mach/vm_region.h>
 #endif  // REX_PLATFORM_MAC
 
@@ -546,6 +550,26 @@ bool Protect(void* base_address, size_t length, PageAccess access, PageAccess* o
 
 bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 #if REX_PLATFORM_MAC
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+  vm_address_t address = reinterpret_cast<vm_address_t>(base_address);
+  vm_size_t region_size = 0;
+  vm_region_basic_info_data_64_t info;
+  mach_msg_type_number_t info_count = VM_REGION_BASIC_INFO_COUNT_64;
+  mach_port_t object_name;
+
+  kern_return_t kr =
+      vm_region_64(mach_task_self(), &address, &region_size, VM_REGION_BASIC_INFO_64,
+                   reinterpret_cast<vm_region_info_t>(&info), &info_count, &object_name);
+  if (kr != KERN_SUCCESS) {
+    return false;
+  }
+  if (address > reinterpret_cast<vm_address_t>(base_address)) {
+    return false;
+  }
+
+  length = static_cast<size_t>((address + region_size) -
+                               reinterpret_cast<vm_address_t>(base_address));
+#else
   mach_vm_address_t address = reinterpret_cast<mach_vm_address_t>(base_address);
   mach_vm_size_t region_size = 0;
   vm_region_basic_info_data_64_t info;
@@ -564,6 +588,7 @@ bool QueryProtect(void* base_address, size_t& length, PageAccess& access_out) {
 
   length = static_cast<size_t>((address + region_size) -
                                reinterpret_cast<mach_vm_address_t>(base_address));
+#endif
 
   if ((info.protection & (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE)) ==
       (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE)) {
@@ -657,12 +682,48 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
   oflag |= O_CREAT;
   auto full_path = MakeShmName(path);
   int ret = shm_open(full_path.c_str(), oflag, 0777);
+#if defined(__APPLE__)
+  std::filesystem::path temp_file;
   if (ret < 0) {
+    // Sandboxed iOS or macOS app: shm_open is blocked by the sandbox.
+    // Fall back to a sparse temporary file inside the app container.
+    std::filesystem::path tmp_dir;
+    if (const char* env_tmp = std::getenv("TMPDIR")) {
+      tmp_dir = env_tmp;
+    } else if (const char* env_home = std::getenv("HOME")) {
+      tmp_dir = std::filesystem::path(env_home) / "tmp";
+    } else {
+      std::error_code ec;
+      tmp_dir = std::filesystem::temp_directory_path(ec);
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(tmp_dir, ec);
+    temp_file = tmp_dir / path.filename();
+    ret = open(temp_file.c_str(), oflag, 0666);
+    if (ret < 0) {
+      REXSYS_ERROR("CreateFileMappingHandle: failed opening temp file {}: {} (errno={})",
+                   temp_file.string(), std::strerror(errno), errno);
+    }
+  }
+#endif
+  if (ret < 0) {
+    REXSYS_ERROR("CreateFileMappingHandle: shm_open failed for {}: {} (errno={})",
+                 full_path, std::strerror(errno), errno);
     return kFileMappingHandleInvalid;
   }
   if (rex_ftruncate64(ret, static_cast<off_t>(length)) != 0) {
+    int err = errno;
+    REXSYS_ERROR("CreateFileMappingHandle: ftruncate failed for size {}: {} (errno={})",
+                 length, std::strerror(err), err);
     close(ret);
-    shm_unlink(full_path.c_str());
+#if defined(__APPLE__)
+    if (!temp_file.empty()) {
+      unlink(temp_file.c_str());
+    } else
+#endif
+    {
+      shm_unlink(full_path.c_str());
+    }
     return kFileMappingHandleInvalid;
   }
   // The name is not needed once the descriptor exists - every view is mapped
@@ -670,7 +731,14 @@ FileMappingHandle CreateFileMappingHandle(const std::filesystem::path& path, siz
   // that skips CloseFileMappingHandle: each hard exit leaked the whole guest
   // arena into /dev/shm, and once that filled up the next run died of SIGBUS
   // touching its own memory, mid-frame, which hung the GPU.
-  shm_unlink(full_path.c_str());
+#if defined(__APPLE__)
+  if (!temp_file.empty()) {
+    unlink(temp_file.c_str());
+  } else
+#endif
+  {
+    shm_unlink(full_path.c_str());
+  }
   return static_cast<FileMappingHandle>(ret);
 #endif
 }

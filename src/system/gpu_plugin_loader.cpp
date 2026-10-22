@@ -57,11 +57,19 @@ std::vector<platform::DynamicLibrary>& LoadedPlugins() {
 std::unique_ptr<IGraphicsSystem> LoadGpuPlugin(std::string_view name, std::string_view backend) {
   auto path = rex::filesystem::GetExecutableFolder() / PluginFileName(name);
   if (!std::filesystem::exists(path)) {
-    REXSYS_ERROR(
-        "GPU plugin '{}' not found at {}. Stage it next to the executable "
-        "(GPU_PLUGINS {} in rexglue_configure_target).",
-        name, path.string(), name);
-    return nullptr;
+#if REX_PLATFORM_MAC
+    auto fallback = rex::filesystem::GetExecutableFolder() / fmt::format("librexgpu-{}.dylib", name);
+    if (std::filesystem::exists(fallback)) {
+      path = fallback;
+    } else
+#endif
+    {
+      REXSYS_ERROR(
+          "GPU plugin '{}' not found at {}. Stage it next to the executable "
+          "(GPU_PLUGINS {} in rexglue_configure_target).",
+          name, path.string(), name);
+      return nullptr;
+    }
   }
 
   platform::DynamicLibrary library;

@@ -1022,7 +1022,7 @@ bool XexModule::LoadContinue() {
     switch (desc.info) {
       case XEX_SECTION_CODE:
       case XEX_SECTION_READONLY_DATA:
-        heap->Protect(address, size, memory::kMemoryProtectRead);
+        heap->Protect(address, size, memory::kMemoryProtectRead | memory::kMemoryProtectWrite);
         break;
       case XEX_SECTION_DATA:
         heap->Protect(address, size, memory::kMemoryProtectRead | memory::kMemoryProtectWrite);

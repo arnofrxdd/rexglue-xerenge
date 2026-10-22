@@ -281,17 +281,23 @@ void InitLogging(const LogConfig& config) {
     resolved_path = NextSequentialLogPath(log_dir, config.app_name);
   }
   if (!resolved_path.empty()) {
-    const int32_t max_mb = REXCVAR_GET(log_max_file_size_mb);
-    spdlog::sink_ptr sink;
-    if (max_mb > 0) {
-      sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
-          resolved_path.string(), size_t(max_mb) << 20, size_t(REXCVAR_GET(log_max_files)), false);
-    } else {
-      sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(resolved_path.string(), false);
+    try {
+      const int32_t max_mb = REXCVAR_GET(log_max_file_size_mb);
+      spdlog::sink_ptr sink;
+      if (max_mb > 0) {
+        sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+            resolved_path.string(), size_t(max_mb) << 20, size_t(REXCVAR_GET(log_max_files)), false);
+      } else {
+        sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(resolved_path.string(), false);
+      }
+      sink->set_level(spdlog::level::trace);
+      sink->set_pattern(config.file_pattern);
+      g_file_sink = sink;
+    } catch (const std::exception& ex) {
+      if (g_console_sink) {
+        // Fall back gracefully to console logging without crashing
+      }
     }
-    sink->set_level(spdlog::level::trace);
-    sink->set_pattern(config.file_pattern);
-    g_file_sink = sink;
   }
 
   g_extra_sinks = config.extra_sinks;

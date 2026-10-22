@@ -15,6 +15,9 @@
 
 #if REX_PLATFORM_MAC
 #include <sys/mman.h>
+#include <mach/mach.h>
+#include <mach/vm_map.h>
+#include <fcntl.h>
 #endif
 
 #include <fmt/format.h>
@@ -140,9 +143,6 @@ Memory::~Memory() {
 bool Memory::Initialize() {
   file_name_ = fmt::format("xenia_memory_{}", chrono::Clock::QueryHostTickCount());
 
-  // Create main page file-backed mapping. This is all reserved but
-  // uncommitted (so it shouldn't expand page file).
-  // Round up to allocation granularity to accommodate platforms with large pages.
   const size_t mapping_size =
       rex::round_up(static_cast<size_t>(0x120000000ull) + system_allocation_granularity_,
                     static_cast<size_t>(system_allocation_granularity_));
@@ -155,8 +155,6 @@ bool Memory::Initialize() {
   }
 
 #if REX_PLATFORM_MAC
-  // On macOS, reserve a contiguous host range first, then carve guest views
-  // into it with MAP_SHARED|MAP_FIXED so all views share the same backing fd.
   if (MapViewsMac()) {
     REXSYS_ERROR("Unable to find a continuous block in the 64bit address space.");
     assert_always();
@@ -180,6 +178,7 @@ bool Memory::Initialize() {
     return false;
   }
 #endif
+
   virtual_membase_ = mapping_base_;
   physical_membase_ = mapping_base_ + 0x100000000ull;
 
@@ -322,9 +321,6 @@ static const struct {
 int Memory::MapViewsMac() {
   assert_true(rex::countof(map_info) == rex::countof(views_.all_views));
 
-  // macOS does not guarantee that a non-MAP_FIXED mmap will honor a requested
-  // address. Reserve a contiguous range first, then MAP_FIXED each view within
-  // it so the guest layout is stable across runs.
   const size_t total_size =
       static_cast<size_t>(map_info[rex::countof(map_info) - 1].virtual_address_end -
                           map_info[0].virtual_address_start + 1);
@@ -344,7 +340,7 @@ int Memory::MapViewsMac() {
     size_t file_offset = static_cast<size_t>(map_info[n].target_address & granularity_mask);
     void* target_address = mapping_base + map_info[n].virtual_address_start;
     void* result = mmap(target_address, view_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
-                        mapping_, file_offset);
+                        static_cast<int>(mapping_), file_offset);
     if (result == MAP_FAILED || result != target_address) {
       int err = errno;
       REXSYS_ERROR(
@@ -384,12 +380,25 @@ int Memory::MapViews(uint8_t* mapping_base) {
 }
 
 void Memory::UnmapViews() {
+#if REX_PLATFORM_MAC
+  if (mapping_base_) {
+    const size_t total_size =
+        static_cast<size_t>(map_info[rex::countof(map_info) - 1].virtual_address_end -
+                            map_info[0].virtual_address_start + 1);
+    munmap(mapping_base_, total_size);
+    mapping_base_ = nullptr;
+    for (auto& view : views_.all_views) {
+      view = nullptr;
+    }
+  }
+#else
   for (size_t n = 0; n < rex::countof(views_.all_views); n++) {
     if (views_.all_views[n]) {
       size_t length = map_info[n].virtual_address_end - map_info[n].virtual_address_start + 1;
       rex::memory::UnmapFileView(mapping_, views_.all_views[n], length);
     }
   }
+#endif
 }
 
 void Memory::Reset() {
@@ -650,6 +659,13 @@ bool Memory::AccessViolationCallback(std::unique_lock<std::recursive_mutex> glob
             }
           }
         }
+      }
+    }
+    if (!allow_write && heap->heap_type() == memory::HeapType::kGuestPhysical) {
+      uint32_t physical_address = GetPhysicalAddress(virtual_address);
+      if (physical_address < 0x20000000) {
+        allow_write = true;
+        guest_protect = memory::kMemoryProtectRead | memory::kMemoryProtectWrite;
       }
     }
     if (allow_write) {

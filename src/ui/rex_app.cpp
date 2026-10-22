@@ -177,7 +177,20 @@ bool ReXApp::SetupEnvironment() {
   auto log_config =
       rex::BuildLogConfig(log_level_str, rex::ParseCategoryLevelsFromConfig(config_path_));
   log_config.app_name = std::string(GetName());
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+  if (const char* home = std::getenv("HOME")) {
+    log_config.log_dir = std::filesystem::path(home) / "Documents" / "logs";
+  } else {
+    log_config.log_dir = user_dir / "logs";
+  }
+#else
   log_config.log_dir = exe_dir / "logs";
+#endif
+#else
+  log_config.log_dir = exe_dir / "logs";
+#endif
   OnConfigureLogging(log_config);
   rex::ApplyLogCvarOverrides(log_config);
   rex::InitLogging(log_config);
@@ -443,7 +456,7 @@ void ReXApp::SetupOverlays(rex::ui::Presenter* presenter, rex::ui::ImmediateDraw
       settings_overlay_ = std::make_unique<ui::SettingsDialog>(imgui_drawer_.get(), config_path_);
     }
   });
-#ifndef _WIN32
+#if !defined(_WIN32) && (!defined(TARGET_OS_IPHONE) || !TARGET_OS_IPHONE)
   // A picture of the window, taken on request. Describing a broken frame in
   // words loses most of what matters about it; a file in logs/shots does not.
   // F12 is left alone - RenderDoc's overlay already uses it.

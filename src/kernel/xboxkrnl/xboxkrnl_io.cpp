@@ -169,8 +169,10 @@ u32 NtCreateFile_entry(mapped_u32 handle_out, u32 desired_access,
 
   *handle_out = handle;
   if (XFAILED(result)) {
+    REXSYS_WARN("NtCreateFile: FAILED '{}' -> {:#x}", target_path, result);
     REXKRNL_IMPORT_FAIL("NtCreateFile", "path='{}' -> {:#x}", target_path, result);
   } else {
+    REXSYS_INFO("NtCreateFile: opened '{}' -> handle={:#x}", target_path, handle);
     REXKRNL_IMPORT_RESULT("NtCreateFile", "{:#x} handle={:#x}", result, handle);
   }
   return result;
@@ -221,23 +223,26 @@ u32 NtReadFile_entry(u32 file_handle, u32 event_handle, mapped_void apc_routine_
         io_status_block->information = bytes_read;
       }
 
+      if (XFAILED(result)) {
+        REXSYS_WARN("NtReadFile: FAILED len={} -> res={:#x}", buffer_length, result);
+      }
+
       // Queue the APC callback. It must be delivered via the APC mechanism even
       // though were are completing immediately.
       // Low bit probably means do not queue to IO ports.
       if ((uint32_t)apc_routine_ptr & ~1) {
-        if (apc_context && result == X_STATUS_SUCCESS) {
+        if (result == X_STATUS_SUCCESS) {
           auto thread = XThread::GetCurrentThread();
           uint32_t apc_routine = static_cast<uint32_t>(apc_routine_ptr) & ~1u;
-          uint32_t apc_ctx = apc_context.guest_address();
-          uint32_t apc_arg1 = io_status_block.guest_address();
+          uint32_t apc_ctx = apc_context ? apc_context.guest_address() : 0;
+          uint32_t apc_arg1 = io_status_block ? io_status_block.guest_address() : 0;
           REXKRNL_IMPORT_TRACE("NtReadFile",
                                "queue_apc thid={} normal={:#x} ctx={:#x} arg1={:#x} arg2=0",
                                thread ? thread->thread_id() : 0, apc_routine, apc_ctx, apc_arg1);
           thread->EnqueueApc(apc_routine, apc_ctx, apc_arg1, 0);
           apc_queued = true;
         } else {
-          REXKRNL_IMPORT_TRACE("NtReadFile", "skip_apc_queue (apc_ctx={:#x}, status={:#x})",
-                               apc_context.guest_address(), result);
+          REXKRNL_IMPORT_TRACE("NtReadFile", "skip_apc_queue (status={:#x})", result);
         }
       }
 

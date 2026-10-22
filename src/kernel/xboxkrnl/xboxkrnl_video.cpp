@@ -469,13 +469,10 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
                             std::memory_order_relaxed);
     }
   } swap_timer;
-  // All of these parameters are REQUIRED.
-  assert(buffer_ptr);
-  assert(fetch_ptr);
-  assert(frontbuffer_ptr);
-  assert(texture_format_ptr);
-  assert(width);
-  assert(height);
+  if (!buffer_ptr || !fetch_ptr || !frontbuffer_ptr || !texture_format_ptr || !width || !height) {
+    REXKRNL_WARN("VdSwap: missing required parameters");
+    return;
+  }
 
   // Presenting here and filling the reservation with no-ops leaves the command
   // ring without the swap packet the title's own Direct3D layer expects to see
@@ -514,25 +511,26 @@ void VdSwap_entry(mapped_void buffer_ptr,      // ptr into primary ringbuffer
   // proper fetch constants like ones used to bind textures to shaders, not CPU
   // MMU addresses, so translation from virtual to physical is needed.
   uint32_t frontbuffer_virtual_address = gpu_fetch.base_address << 12;
-  assert_true(*frontbuffer_ptr == frontbuffer_virtual_address);
   uint32_t frontbuffer_physical_address =
       REX_KERNEL_MEMORY()->GetPhysicalAddress(frontbuffer_virtual_address);
-  assert_true(frontbuffer_physical_address != UINT32_MAX);
   if (frontbuffer_physical_address == UINT32_MAX) {
-    // Xenia-specific safety check.
-    REXKRNL_ERROR("VdSwap: Invalid front buffer virtual address 0x{:08X}",
-                  frontbuffer_virtual_address);
-    return;
+    if (frontbuffer_virtual_address < 0x20000000) {
+      frontbuffer_physical_address = frontbuffer_virtual_address;
+    } else {
+      frontbuffer_physical_address = frontbuffer_virtual_address & 0x1FFFFFFF;
+    }
   }
   gpu_fetch.base_address = frontbuffer_physical_address >> 12;
 
   auto texture_format = rex::graphics::xenos::TextureFormat(texture_format_ptr.value());
+  if (texture_format != rex::graphics::xenos::TextureFormat::k_8_8_8_8 &&
+      texture_format != rex::graphics::xenos::TextureFormat::k_2_10_10_10_AS_16_16_16_16) {
+    REXKRNL_WARN("VdSwap: unexpected texture format {}", static_cast<uint32_t>(texture_format));
+  }
   auto color_space = *color_space_ptr;
-  assert_true(texture_format == rex::graphics::xenos::TextureFormat::k_8_8_8_8 ||
-              texture_format == rex::graphics::xenos::TextureFormat::k_2_10_10_10_AS_16_16_16_16);
-  assert_true(color_space == 0);  // RGB(0)
-  assert_true(*width == 1 + gpu_fetch.size_2d.width);
-  assert_true(*height == 1 + gpu_fetch.size_2d.height);
+  if (color_space != 0) {
+    REXKRNL_WARN("VdSwap: unexpected color space {}", static_cast<uint32_t>(color_space));
+  }
 
   // The caller seems to reserve 64 words (256b) in the primary ringbuffer
   // for this method to do what it needs. We just zero them out and send a

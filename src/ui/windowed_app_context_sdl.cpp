@@ -47,15 +47,27 @@ bool SDLWindowedAppContext::Initialize() {
   // which surface extensions it has, so the cvar is the escape hatch.
   std::string requested_driver = REXCVAR_GET(video_driver);
 #if REX_PLATFORM_MAC
+#include <TargetConditionals.h>
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+  if (requested_driver.empty()) {
+    requested_driver = "uikit";
+  }
+#else
   // macOS presents via a CAMetalLayer surface obtained from the Cocoa driver.
   if (requested_driver.empty()) {
     requested_driver = "cocoa";
   }
 #endif
+#endif
   if (!requested_driver.empty()) {
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, requested_driver.c_str());
   }
 #if REX_PLATFORM_MAC
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+  if (!SDL_GetHint(SDL_HINT_VULKAN_LIBRARY)) {
+    SDL_SetHint(SDL_HINT_VULKAN_LIBRARY, "libMoltenVK.dylib");
+  }
+#else
   // A GPU plugin that makes its own Vulkan instance through SDL never runs
   // VulkanInstance::Create, so the loader and MoltenVK staged beside the
   // executable have to be found here. SDL only tries bare library names,
@@ -66,6 +78,7 @@ bool SDLWindowedAppContext::Initialize() {
   if (!vulkan_paths.loader_candidates.empty() && !SDL_GetHint(SDL_HINT_VULKAN_LIBRARY)) {
     SDL_SetHint(SDL_HINT_VULKAN_LIBRARY, vulkan_paths.loader_candidates.front().string().c_str());
   }
+#endif
 #endif
   if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
     REXLOG_ERROR("SDL_InitSubSystem(SDL_INIT_VIDEO) failed: {}", SDL_GetError());

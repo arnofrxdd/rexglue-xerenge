@@ -30,19 +30,17 @@ u32 XAudioGetSpeakerConfig_entry(mapped_u32 config_ptr) {
 }
 
 u32 XAudioGetVoiceCategoryVolumeChangeMask_entry(mapped_void driver_ptr, mapped_u32 out_ptr) {
-  assert_true((driver_ptr.guest_address() & 0xFFFF0000) == 0x41550000);
-
-  rex::thread::Sleep(std::chrono::microseconds(1));
-
-  // Checking these bits to see if any voice volume changed.
-  // I think.
-  *out_ptr = 0;
+  if (out_ptr) {
+    *out_ptr = 0;
+  }
   return X_ERROR_SUCCESS;
 }
 
 u32 XAudioGetVoiceCategoryVolume_entry(u32 unk, mapped_f32 out_ptr) {
   // Expects a floating point single. Volume %?
-  *out_ptr = 1.0f;
+  if (out_ptr) {
+    *out_ptr = 1.0f;
+  }
 
   return X_ERROR_SUCCESS;
 }
@@ -74,13 +72,16 @@ u32 XAudioRegisterRenderDriverClient_entry(mapped_u32 callback_ptr, mapped_u32 d
     return result;
   }
 
-  assert_true(!(index & ~0x0000FFFF));
-  *driver_ptr = 0x41550000 | (static_cast<uint32_t>(index) & 0x0000FFFF);
+  if (driver_ptr) {
+    *driver_ptr = 0x41550000 | (static_cast<uint32_t>(index) & 0x0000FFFF);
+  }
   return X_ERROR_SUCCESS;
 }
 
 u32 XAudioUnregisterRenderDriverClient_entry(mapped_void driver_ptr) {
-  assert_true((driver_ptr.guest_address() & 0xFFFF0000) == 0x41550000);
+  if ((driver_ptr.guest_address() & 0xFFFF0000) != 0x41550000) {
+    return X_ERROR_SUCCESS;
+  }
 
   auto* audio_system =
       static_cast<audio::AudioSystem*>(REX_KERNEL_STATE()->emulator()->audio_system());
@@ -89,7 +90,9 @@ u32 XAudioUnregisterRenderDriverClient_entry(mapped_void driver_ptr) {
 }
 
 u32 XAudioSubmitRenderDriverFrame_entry(mapped_void driver_ptr, mapped_void samples_ptr) {
-  assert_true((driver_ptr.guest_address() & 0xFFFF0000) == 0x41550000);
+  if ((driver_ptr.guest_address() & 0xFFFF0000) != 0x41550000) {
+    return X_ERROR_SUCCESS;
+  }
 
   static uint32_t submit_krnl_count = 0;
   if (submit_krnl_count < 10) {

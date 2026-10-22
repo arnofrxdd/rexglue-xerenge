@@ -123,10 +123,10 @@ function(rexglue_configure_target target_name)
         foreach(_rexglue_runtime_lib rex::runtime rexruntime rex::TracyClient TracyClient)
             if(TARGET ${_rexglue_runtime_lib})
                 add_custom_command(TARGET ${target_name} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${target_name}>
                     COMMAND ${CMAKE_COMMAND} -E copy_if_different
                         $<TARGET_FILE:${_rexglue_runtime_lib}>
                         $<TARGET_FILE_DIR:${target_name}>
-                    VERBATIM
                 )
             endif()
         endforeach()
@@ -163,16 +163,34 @@ function(rexglue_configure_target target_name)
                 "(no target rexgpu-${_plugin} or rex::gpu-${_plugin})")
         endif()
         add_custom_command(TARGET ${target_name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${target_name}>
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_FILE:${_plugin_target}>
                 $<TARGET_FILE_DIR:${target_name}>
-            VERBATIM
         )
         unset(_plugin_target)
     endforeach()
 
-    if(APPLE AND REXGLUE_USE_VULKAN)
+    if(APPLE AND NOT IOS AND REXGLUE_USE_VULKAN)
         _rexglue_stage_macos_vulkan_runtime(${target_name})
+    elseif(IOS AND REXGLUE_USE_VULKAN)
+        if(TARGET MoltenVK)
+            add_custom_command(TARGET ${target_name} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${target_name}>
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:MoltenVK>
+                    $<TARGET_FILE_DIR:${target_name}>
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:MoltenVK>
+                    $<TARGET_FILE_DIR:${target_name}>/libMoltenVK.dylib
+            )
+        endif()
+    endif()
+
+    if(IOS)
+        add_custom_command(TARGET ${target_name} POST_BUILD
+            COMMAND find "$TARGET_BUILD_DIR/$FULL_PRODUCT_NAME" -name "*.dylib" -exec codesign --force --sign "Apple Development" {} +
+        )
     endif()
 endfunction()
 

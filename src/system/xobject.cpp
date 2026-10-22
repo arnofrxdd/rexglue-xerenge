@@ -326,6 +326,31 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode, uint32_t a
                                 : std::chrono::milliseconds::max();
 
   XThread::CheckTitleTermination();
+  if (timeout_ms == std::chrono::milliseconds::max()) {
+    for (uint32_t waited = 0;; waited += 2) {
+      auto result = rex::thread::Wait(wait_handle, alertable ? true : false, std::chrono::milliseconds(2000));
+      XThread::CheckTitleTermination();
+      if (result != rex::thread::WaitResult::kTimeout) {
+        switch (result) {
+          case rex::thread::WaitResult::kSuccess:
+            WaitCallback();
+            return X_STATUS_SUCCESS;
+          case rex::thread::WaitResult::kUserCallback:
+            return X_STATUS_USER_APC;
+          default:
+          case rex::thread::WaitResult::kAbandoned:
+          case rex::thread::WaitResult::kFailed:
+            return X_STATUS_ABANDONED_WAIT_0;
+        }
+      }
+      if (rex::system::XThread::IsInThread()) {
+        auto* curr = rex::system::XThread::GetCurrentThread();
+        REXSYS_WARN("STUCK XObject::Wait for {}s on obj {:08X} type {} thread {:08X} '{}' (reason {})",
+                    waited + 2, guest_object(), (uint32_t)type(),
+                    curr ? curr->thread_id() : 0, curr ? curr->name() : "?", wait_reason);
+      }
+    }
+  }
   auto result = rex::thread::Wait(wait_handle, alertable ? true : false, timeout_ms);
   XThread::CheckTitleTermination();
   switch (result) {
@@ -387,6 +412,60 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects, uint32_t wait_
                                 : std::chrono::milliseconds::max();
 
   XThread::CheckTitleTermination();
+  if (timeout_ms == std::chrono::milliseconds::max()) {
+    for (uint32_t waited = 0;; waited += 2) {
+      if (wait_type) {
+        std::vector<rex::thread::WaitHandle*> copy = wait_handles;
+        auto result =
+            rex::thread::WaitAny(std::move(copy), alertable ? true : false, std::chrono::milliseconds(2000));
+        XThread::CheckTitleTermination();
+        if (result.first != rex::thread::WaitResult::kTimeout) {
+          switch (result.first) {
+            case rex::thread::WaitResult::kSuccess:
+              objects[result.second]->WaitCallback();
+              return X_STATUS(result.second);
+            case rex::thread::WaitResult::kUserCallback:
+              return X_STATUS_USER_APC;
+            default:
+            case rex::thread::WaitResult::kAbandoned:
+              return X_STATUS(X_STATUS_ABANDONED_WAIT_0 + result.second);
+            case rex::thread::WaitResult::kFailed:
+              return X_STATUS_UNSUCCESSFUL;
+          }
+        }
+      } else {
+        std::vector<rex::thread::WaitHandle*> copy = wait_handles;
+        auto result =
+            rex::thread::WaitAll(std::move(copy), alertable ? true : false, std::chrono::milliseconds(2000));
+        XThread::CheckTitleTermination();
+        if (result != rex::thread::WaitResult::kTimeout) {
+          switch (result) {
+            case rex::thread::WaitResult::kSuccess:
+              for (uint32_t i = 0; i < count; i++) {
+                objects[i]->WaitCallback();
+              }
+              return X_STATUS_SUCCESS;
+            case rex::thread::WaitResult::kUserCallback:
+              return X_STATUS_USER_APC;
+            default:
+            case rex::thread::WaitResult::kAbandoned:
+            case rex::thread::WaitResult::kFailed:
+              return X_STATUS_ABANDONED_WAIT_0;
+          }
+        }
+      }
+      if (rex::system::XThread::IsInThread()) {
+        auto* curr = rex::system::XThread::GetCurrentThread();
+        REXSYS_WARN("STUCK XObject::WaitMultiple ({}) for {}s count={} on thread {:08X} '{}' (reason {})",
+                    wait_type ? "ANY" : "ALL", waited + 2, count,
+                    curr ? curr->thread_id() : 0, curr ? curr->name() : "?", wait_reason);
+        for (size_t i = 0; i < count; ++i) {
+          REXSYS_WARN("  wait_obj[{}] = {:08X} type {}", i, objects[i]->guest_object(), (uint32_t)objects[i]->type());
+        }
+      }
+    }
+  }
+
   if (wait_type) {
     auto result =
         rex::thread::WaitAny(std::move(wait_handles), alertable ? true : false, timeout_ms);

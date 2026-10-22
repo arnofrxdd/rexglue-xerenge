@@ -13,6 +13,7 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 
 #include <algorithm>
+#include <mutex>
 #include <string>
 
 #include <rex/chrono/chrono_steady_cast.h>
@@ -348,6 +349,10 @@ void xeRtlInitializeCriticalSection(X_RTL_CRITICAL_SECTION* cs, uint32_t cs_ptr)
 }
 
 void RtlInitializeCriticalSection_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs) {
+  if (!cs || !cs.guest_address() || !cs.host_address()) {
+    REXKRNL_WARN("RtlInitializeCriticalSection: null cs");
+    return;
+  }
   REXKRNL_IMPORT_TRACE("RtlInitializeCriticalSection", "cs={:#x}", cs.guest_address());
   xeRtlInitializeCriticalSection(cs, cs.guest_address());
 }
@@ -373,10 +378,31 @@ X_STATUS xeRtlInitializeCriticalSectionAndSpinCount(X_RTL_CRITICAL_SECTION* cs, 
 
 u32 RtlInitializeCriticalSectionAndSpinCount_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs,
                                                    u32 spin_count) {
+  if (!cs || !cs.guest_address() || !cs.host_address()) {
+    REXKRNL_WARN("RtlInitializeCriticalSectionAndSpinCount: null cs");
+    return X_STATUS_INVALID_PARAMETER;
+  }
   return xeRtlInitializeCriticalSectionAndSpinCount(cs, cs.guest_address(), spin_count);
 }
 
 void RtlEnterCriticalSection_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs) {
+  if (!cs || !cs.guest_address() || !cs.host_address()) {
+    REXKRNL_WARN("RtlEnterCriticalSection: null cs");
+    return;
+  }
+
+  if (cs->header.type != 1 && cs->owning_thread == 0 && cs->recursion_count == 0) {
+    static std::mutex init_mutex;
+    std::lock_guard lock(init_mutex);
+    if (cs->header.type != 1 && cs->owning_thread == 0 && cs->recursion_count == 0) {
+      REXKRNL_WARN(
+          "RtlEnterCriticalSection: auto-initializing uninitialized critical section cs={:#x} "
+          "(type={})",
+          cs.guest_address(), static_cast<uint32_t>(cs->header.type));
+      xeRtlInitializeCriticalSection(cs, cs.guest_address());
+    }
+  }
+
   uint32_t cur_thread = XThread::GetCurrentThread()->guest_object();
   uint32_t spin_count = cs->header.absolute * 256;
 
@@ -402,12 +428,32 @@ void RtlEnterCriticalSection_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs) {
     xeKeWaitForSingleObject(reinterpret_cast<void*>(cs.host_address()), 8, 0, 0, nullptr);
   }
 
-  assert_true(cs->owning_thread == 0);
+  if (cs->owning_thread != 0) {
+    REXKRNL_WARN("RtlEnterCriticalSection: cs={:#x} already has owner {:#x}, overriding to {:#x}",
+                 cs.guest_address(), static_cast<uint32_t>(cs->owning_thread), cur_thread);
+  }
   cs->owning_thread = cur_thread;
   cs->recursion_count = 1;
 }
 
 u32 RtlTryEnterCriticalSection_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs) {
+  if (!cs || !cs.guest_address() || !cs.host_address()) {
+    REXKRNL_WARN("RtlTryEnterCriticalSection: null cs");
+    return 0;
+  }
+
+  if (cs->header.type != 1 && cs->owning_thread == 0 && cs->recursion_count == 0) {
+    static std::mutex init_mutex;
+    std::lock_guard lock(init_mutex);
+    if (cs->header.type != 1 && cs->owning_thread == 0 && cs->recursion_count == 0) {
+      REXKRNL_WARN(
+          "RtlTryEnterCriticalSection: auto-initializing uninitialized critical section cs={:#x} "
+          "(type={})",
+          cs.guest_address(), static_cast<uint32_t>(cs->header.type));
+      xeRtlInitializeCriticalSection(cs, cs.guest_address());
+    }
+  }
+
   uint32_t thread = XThread::GetCurrentThread()->guest_object();
 
   if (rex::thread::atomic_cas(-1, 0, &cs->lock_count)) {
@@ -427,13 +473,29 @@ u32 RtlTryEnterCriticalSection_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs) {
 }
 
 void RtlLeaveCriticalSection_entry(ppc_ptr_t<X_RTL_CRITICAL_SECTION> cs) {
-  assert_true(cs->owning_thread == XThread::GetCurrentThread()->guest_object());
+  if (!cs || !cs.guest_address() || !cs.host_address()) {
+    REXKRNL_WARN("RtlLeaveCriticalSection: null cs");
+    return;
+  }
+  uint32_t cur_thread = XThread::GetCurrentThread()->guest_object();
+  if (cs->owning_thread != cur_thread) {
+    REXKRNL_WARN(
+        "RtlLeaveCriticalSection: cs={:#x} not owned by current thread {:#x} (owner={:#x})",
+        cs.guest_address(), cur_thread, static_cast<uint32_t>(cs->owning_thread));
+    return;
+  }
 
   // Drop recursion count - if it isn't zero we still have the lock.
-  assert_true(cs->recursion_count > 0);
-  if (--cs->recursion_count != 0) {
-    assert_true(cs->recursion_count >= 0);
+  if (cs->recursion_count <= 0) {
+    REXKRNL_WARN("RtlLeaveCriticalSection: cs={:#x} recursion_count <= 0 ({})",
+                 cs.guest_address(), static_cast<int32_t>(cs->recursion_count));
+    cs->owning_thread = 0;
+    cs->recursion_count = 0;
+    cs->lock_count = -1;
+    return;
+  }
 
+  if (--cs->recursion_count != 0) {
     rex::thread::atomic_dec(&cs->lock_count);
     return;
   }
