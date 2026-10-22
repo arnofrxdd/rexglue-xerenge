@@ -1408,7 +1408,7 @@ thread_local PosixThread* current_thread_ = nullptr;
 
 void* PosixCondition<Thread>::ThreadStartRoutine(void* parameter) {
 #if defined(__APPLE__)
-  pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+  pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
 #endif
 #if !REX_PLATFORM_ANDROID
   if (pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, nullptr) != 0) {
