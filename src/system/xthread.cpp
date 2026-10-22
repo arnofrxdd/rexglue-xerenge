@@ -945,6 +945,8 @@ X_STATUS XThread::Resume(uint32_t* out_suspend_count) {
     uint8_t previous = guest_thread->suspend_count;
     if (previous > 0) {
       guest_thread->suspend_count--;
+    } else {
+      early_resume_ = true;
     }
     if (out_suspend_count) {
       *out_suspend_count = previous;
@@ -991,6 +993,15 @@ uint32_t XThread::SelfSuspend() {
   auto guest_thread = guest_object<X_KTHREAD>();
   std::unique_lock<std::mutex> lock(suspend_mutex_);
   uint32_t previous = guest_thread->suspend_count;
+  // Burnout's movie player suspends its workers after their work and the main
+  // thread resumes them for more - often before the suspend. Lost, the last
+  // such resume left a worker asleep and the main thread waiting on its output
+  // for good (a race's loading movie frozen, GitHub #36). The worker's loop
+  // looks for work again after any wake, so returning at once is safe.
+  if (early_resume_ && previous == 0) {
+    early_resume_ = false;
+    return previous;
+  }
   guest_thread->suspend_count++;
   suspend_cv_.wait(lock, [guest_thread]() { return guest_thread->suspend_count == 0; });
   return previous;
